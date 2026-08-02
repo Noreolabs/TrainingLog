@@ -13,6 +13,7 @@ let state = {
   selectedDayName: null,   // overrides the weekday-derived plan day when set
   openExercise: null,      // name of currently expanded exercise card
   sets: [],                // all logged sets (loaded once, kept in memory, synced to db)
+  historyDay: null,
   historyExercise: null,
   importParsed: null,      // parsed plan pending review
   exportRange: null
@@ -284,18 +285,64 @@ function renderWeek() {
 }
 
 /* ================= HISTORY ================= */
-function allExerciseNames() {
-  const names = new Set();
-  state.sets.forEach(s => names.add(s.exerciseName));
-  state.plans.forEach(p => p.days.forEach(d => d.exercises.forEach(e => names.add(e.name))));
-  return Array.from(names).sort();
+function bestSetFor(exerciseName) {
+  const entries = state.sets.filter(s => s.exerciseName === exerciseName);
+  if (!entries.length) return null;
+  return entries.reduce((best, s) =>
+    (!best || s.weight > best.weight || (s.weight === best.weight && s.reps > best.reps)) ? s : best
+  , null);
+}
+
+function lastSessionTopSetFor(exerciseName) {
+  const entries = state.sets.filter(s => s.exerciseName === exerciseName);
+  if (!entries.length) return null;
+  const maxDate = entries.reduce((m, s) => (s.date > m ? s.date : m), entries[0].date);
+  const daySets = entries.filter(s => s.date === maxDate);
+  return daySets.reduce((best, s) => (!best || s.weight > best.weight) ? s : best, daySets[0]);
+}
+
+function liftDays() {
+  return state.activePlan.days.filter(d => d.type !== "rest" && d.exercises.length);
 }
 
 function renderHistory() {
-  const names = allExerciseNames();
-  if (!state.historyExercise && names.length) state.historyExercise = names[0];
+  if (state.historyExercise) return renderHistoryExerciseDetail();
 
-  const options = names.map(n => `<option value="${escAttr(n)}" ${n===state.historyExercise?"selected":""}>${escHtml(n)}</option>`).join("");
+  const days = liftDays();
+  if (!days.length) return `<div class="empty-state">Your active plan has no training days yet.</div>`;
+
+  if (!state.historyDay || !days.some(d => d.day === state.historyDay)) {
+    const todayName = weekdayNameFromISO(todayISO());
+    state.historyDay = days.some(d => d.day === todayName) ? todayName : days[0].day;
+  }
+  const day = days.find(d => d.day === state.historyDay);
+
+  const options = days.map(d => `<option value="${escAttr(d.day)}" ${d.day===state.historyDay?"selected":""}>${d.day} — ${escHtml(d.title)}</option>`).join("");
+
+  const cards = day.exercises.map(ex => {
+    const last = lastSessionTopSetFor(ex.name);
+    const best = bestSetFor(ex.name);
+    return `<div class="hist-snap-card" data-open-exercise="${escAttr(ex.name)}">
+      <div class="hist-snap-name">${escHtml(ex.name)}</div>
+      ${last ? `
+        <div class="hist-snap-row"><span class="hist-snap-label">Last</span><span class="hist-snap-val">${last.reps} × ${last.weight} lb${last.rpe?` @ RPE ${last.rpe}`:""} <span class="hist-snap-date">${friendlyDate(last.date)}</span></span></div>
+        <div class="hist-snap-row"><span class="hist-snap-label">Best</span><span class="hist-snap-val hist-snap-best">${best.reps} × ${best.weight} lb <span class="hist-snap-date">${friendlyDate(best.date)}</span></span></div>
+      ` : `<div class="hist-snap-empty">Not logged yet</div>`}
+    </div>`;
+  }).join("");
+
+  return `
+    <div class="section-label">History by day</div>
+    <div class="history-controls">
+      <select id="history-day-select">${options}</select>
+    </div>
+    ${cards}
+  `;
+}
+
+function renderHistoryExerciseDetail() {
+  const dayObj = state.activePlan.days.find(d => d.day === state.historyDay);
+  const backLabel = dayObj ? `${dayObj.day} — ${dayObj.title}` : (state.historyDay || "day");
 
   const entries = state.sets
     .filter(s => s.exerciseName === state.historyExercise)
@@ -320,10 +367,8 @@ function renderHistory() {
   }
 
   return `
-    <div class="section-label">Progression</div>
-    <div class="history-controls">
-      <select id="history-exercise-select">${options}</select>
-    </div>
+    <button type="button" class="btn btn-ghost btn-sm" id="history-back" style="margin-bottom:14px;">← Back to ${escHtml(backLabel)}</button>
+    <div class="section-label">${escHtml(state.historyExercise)}</div>
     ${list}
   `;
 }
@@ -534,9 +579,20 @@ function bindViewEvents() {
   });
 
   // ---- HISTORY ----
-  const histSelect = document.getElementById("history-exercise-select");
-  if (histSelect) histSelect.addEventListener("change", (e) => {
-    state.historyExercise = e.target.value;
+  const histDaySelect = document.getElementById("history-day-select");
+  if (histDaySelect) histDaySelect.addEventListener("change", (e) => {
+    state.historyDay = e.target.value;
+    render();
+  });
+  root.querySelectorAll("[data-open-exercise]").forEach(card => {
+    card.addEventListener("click", () => {
+      state.historyExercise = card.dataset.openExercise;
+      render();
+    });
+  });
+  const histBack = document.getElementById("history-back");
+  if (histBack) histBack.addEventListener("click", () => {
+    state.historyExercise = null;
     render();
   });
 

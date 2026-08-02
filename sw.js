@@ -1,4 +1,4 @@
-const CACHE = "replog-shell-v1";
+const CACHE = "replog-shell-v2";
 const SHELL = [
   "./",
   "./index.html",
