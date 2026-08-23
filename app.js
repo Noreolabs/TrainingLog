@@ -273,14 +273,6 @@ function setsFor(date, exerciseName) {
     .sort((a,b) => a.setNumber - b.setNumber);
 }
 
-function prevSessionTopSet(exerciseName, beforeDate) {
-  const entries = state.sets.filter(s => s.exerciseName === exerciseName && s.date < beforeDate);
-  if (!entries.length) return null;
-  const maxDate = entries.reduce((m, s) => (s.date > m ? s.date : m), entries[0].date);
-  const daySets = entries.filter(s => s.date === maxDate);
-  return daySets.reduce((best, s) => (!best || s.weight > best.weight) ? s : best, daySets[0]);
-}
-
 function renderWeekStrip() {
   const weekStart = startOfWeekISO(state.selectedDate);
   const dates = weekDatesFrom(weekStart);
@@ -359,8 +351,10 @@ function renderToday() {
 function renderExerciseCard(ex, index, date) {
   const isOpen = state.openExercise === ex.name;
   const logged = setsFor(date, ex.name);
-  const prevTop = prevSessionTopSet(ex.name, date);
-  const best = bestSetFor(ex.name);
+  const bestWorking = bestSetByType(ex.name, "feeder");
+  const bestTop = bestSetByType(ex.name, "top");
+  const bestBackoff = bestSetByType(ex.name, "backoff");
+  const hasAnyTypeData = bestWorking || bestTop || bestBackoff;
 
   const setRows = logged.map(s => `
     <div class="set-row" data-set-id="${s.id}">
@@ -373,6 +367,14 @@ function renderExerciseCard(ex, index, date) {
       <button class="set-del" data-del-set="${s.id}" aria-label="Delete set">✕</button>
     </div>
   `).join("");
+
+  const typeStatRow = (type, best) => `
+    <div class="type-stat-row">
+      <span class="type-stat-tag type-${type}">${setTypeLabel(type)}</span>
+      ${best
+        ? `<span class="type-stat-val">${best.reps} × ${best.weight} lb<span class="type-stat-date">${friendlyDate(best.date)}</span></span>`
+        : `<span class="type-stat-val type-stat-empty">No data yet</span>`}
+    </div>`;
 
   return `
     <div class="ex-card ${isOpen ? "open" : ""}" data-exercise="${escAttr(ex.name)}">
@@ -387,10 +389,11 @@ function renderExerciseCard(ex, index, date) {
       </div>
       <div class="ex-body">
         ${ex.notes ? `<div class="ex-note">${escHtml(ex.notes)}</div>` : ""}
-        ${prevTop || best ? `<div class="prev-stats">
-          ${prevTop ? `<div class="prev-log"><span class="prev-label">Prev</span><span class="prev-val">${prevTop.reps} × ${prevTop.weight} lb${setInlineTag(prevTop)} <span class="prev-date">${friendlyDate(prevTop.date)}</span></span></div>` : `<div class="prev-log"><span class="prev-label">Prev</span><span class="prev-val prev-empty">No history yet</span></div>`}
-          ${best ? `<div class="prev-log"><span class="prev-label">Best</span><span class="prev-val prev-best">${best.reps} × ${best.weight} lb <span class="prev-date">${friendlyDate(best.date)}</span></span></div>` : ""}
-        </div>` : `<div class="prev-log"><span class="prev-label">No history yet</span></div>`}
+        ${hasAnyTypeData ? `<div class="type-stats">
+          ${typeStatRow("feeder", bestWorking)}
+          ${typeStatRow("top", bestTop)}
+          ${typeStatRow("backoff", bestBackoff)}
+        </div>` : `<div class="type-stats-empty">No tagged sets yet — mark a set as Working, Top Set, or Back-off to start tracking bests per category.</div>`}
         ${setRows}
         <form class="add-set-form" data-add-set="${escAttr(ex.name)}">
           <div class="field-grid field-grid-2">
@@ -438,6 +441,14 @@ function renderWeek() {
 /* ================= HISTORY ================= */
 function bestSetFor(exerciseName) {
   const entries = state.sets.filter(s => s.exerciseName === exerciseName);
+  if (!entries.length) return null;
+  return entries.reduce((best, s) =>
+    (!best || s.weight > best.weight || (s.weight === best.weight && s.reps > best.reps)) ? s : best
+  , null);
+}
+
+function bestSetByType(exerciseName, type) {
+  const entries = state.sets.filter(s => s.exerciseName === exerciseName && s.setType === type);
   if (!entries.length) return null;
   return entries.reduce((best, s) =>
     (!best || s.weight > best.weight || (s.weight === best.weight && s.reps > best.reps)) ? s : best
