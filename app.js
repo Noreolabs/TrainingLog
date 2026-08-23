@@ -1,8 +1,9 @@
 /* ===================== Rep Log — app logic ===================== */
 
 const DB_NAME = "replog";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const WEEKDAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+const DAY_ABBR = { Sunday:"Su", Monday:"Mo", Tuesday:"Tu", Wednesday:"We", Thursday:"Th", Friday:"Fr", Saturday:"Sa" };
 
 let db = null;
 let state = {
@@ -10,10 +11,11 @@ let state = {
   plans: [],
   activePlan: null,
   selectedDate: todayISO(),
-  selectedDayName: null,   // overrides the weekday-derived plan day when set
+  dayOverrides: {},        // { "2026-08-23": "Saturday" } — persisted per-date plan-day overrides
   openExercise: null,      // name of currently expanded exercise card
   sets: [],                // all logged sets (loaded once, kept in memory, synced to db)
   historyDay: null,
+  dayPickerOpen: false,
   historyExercise: null,
   importParsed: null,      // parsed plan pending review
   exportRange: null
@@ -38,6 +40,44 @@ function friendlyDate(iso) {
   const dt = new Date(y, m-1, d);
   return dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
+function addDaysISO(iso, n) {
+  const [y,m,d] = iso.split("-").map(Number);
+  const dt = new Date(y, m-1, d);
+  dt.setDate(dt.getDate() + n);
+  return isoFromDate(dt);
+}
+function startOfWeekISO(iso) {
+  const [y,m,d] = iso.split("-").map(Number);
+  const dt = new Date(y, m-1, d);
+  const dow = dt.getDay(); // 0=Sun..6=Sat
+  const offset = dow === 0 ? -6 : 1 - dow; // shift back to Monday
+  dt.setDate(dt.getDate() + offset);
+  return isoFromDate(dt);
+}
+function weekDatesFrom(startISO) {
+  const out = [];
+  for (let i = 0; i < 7; i++) out.push(addDaysISO(startISO, i));
+  return out;
+}
+function shortDateLabel(iso) {
+  const [y,m,d] = iso.split("-").map(Number);
+  return new Date(y, m-1, d).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/* ---------- effective day resolution (accounts for persisted swaps) ---------- */
+function effectiveDayName(dateISO) {
+  return state.dayOverrides[dateISO] || weekdayNameFromISO(dateISO);
+}
+async function setDayOverride(dateISO, dayName) {
+  const defaultName = weekdayNameFromISO(dateISO);
+  if (dayName === defaultName) {
+    delete state.dayOverrides[dateISO];
+    try { await idbDelete("dayOverrides", dateISO); } catch(e) {}
+  } else {
+    state.dayOverrides[dateISO] = dayName;
+    await idbPut("dayOverrides", { date: dateISO, dayName });
+  }
+}
 
 /* ---------- IndexedDB helper ---------- */
 function openDB() {
@@ -55,6 +95,9 @@ function openDB() {
       }
       if (!_db.objectStoreNames.contains("meta")) {
         _db.createObjectStore("meta", { keyPath: "key" });
+      }
+      if (!_db.objectStoreNames.contains("dayOverrides")) {
+        _db.createObjectStore("dayOverrides", { keyPath: "date" });
       }
     };
     req.onsuccess = (e) => resolve(e.target.result);
@@ -110,8 +153,12 @@ async function init() {
   state.activePlan = state.plans.find(p => p.id === activeId) || state.plans[state.plans.length-1];
 
   state.sets = await idbGetAll("sets");
+  const overrides = await idbGetAll("dayOverrides");
+  state.dayOverrides = {};
+  overrides.forEach(o => { state.dayOverrides[o.date] = o.dayName; });
 
   bindNav();
+  bindDayPickerEvents();
   window.addEventListener("online", updateOnlineBanner);
   window.addEventListener("offline", updateOnlineBanner);
   updateOnlineBanner();
@@ -159,12 +206,65 @@ function render() {
   else if (state.tab === "plan") root.innerHTML = renderPlanTab();
 
   bindViewEvents();
+  renderDayPicker();
+}
+
+/* ================= DAY PICKER OVERLAY ================= */
+function renderDayPicker() {
+  const overlay = document.getElementById("day-picker-overlay");
+  overlay.classList.toggle("hidden", !state.dayPickerOpen);
+  if (!state.dayPickerOpen) return;
+
+  const currentDayName = effectiveDayName(state.selectedDate);
+  const todayName = weekdayNameFromISO(todayISO());
+
+  const list = document.getElementById("day-picker-list");
+  list.innerHTML = state.activePlan.days.map(d => {
+    const isRest = d.type === "rest" || d.exercises.length === 0;
+    const isSelected = d.day === currentDayName;
+    const isToday = d.day === todayName;
+    return `<div class="day-picker-row ${isSelected ? "selected" : ""}" data-pick-day="${escAttr(d.day)}">
+      <div class="day-picker-main">
+        <div class="day-picker-day">${d.day}</div>
+        <div class="day-picker-title ${isRest ? "rest" : ""}">${escHtml(d.title)}</div>
+      </div>
+      ${isToday ? `<span class="day-picker-today-badge">Today</span>` : ""}
+      ${isSelected ? `<svg class="day-picker-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function bindDayPickerEvents() {
+  const overlay = document.getElementById("day-picker-overlay");
+  overlay.addEventListener("click", async (e) => {
+    if (e.target === overlay || e.target.id === "day-picker-close") {
+      state.dayPickerOpen = false;
+      render();
+      return;
+    }
+    const row = e.target.closest("[data-pick-day]");
+    if (row) {
+      await setDayOverride(state.selectedDate, row.dataset.pickDay);
+      state.dayPickerOpen = false;
+      render();
+    }
+  });
 }
 
 /* ================= TODAY ================= */
 function currentDayObj() {
-  const dayName = state.selectedDayName || weekdayNameFromISO(state.selectedDate);
+  const dayName = effectiveDayName(state.selectedDate);
   return state.activePlan.days.find(d => d.day === dayName) || state.activePlan.days[0];
+}
+
+/* ---------- set type helpers ---------- */
+const SET_TYPE_LABELS = { feeder: "Working", top: "Top Set", backoff: "Back-off" };
+function setTypeLabel(t) { return SET_TYPE_LABELS[t] || ""; }
+function setInlineTag(s) {
+  // Prefer the new set-type tag; fall back to legacy RPE for older logged sets.
+  if (s.setType) return ` · ${setTypeLabel(s.setType)}`;
+  if (s.rpe) return ` @ RPE ${s.rpe}`;
+  return "";
 }
 
 function setsFor(date, exerciseName) {
@@ -173,17 +273,55 @@ function setsFor(date, exerciseName) {
     .sort((a,b) => a.setNumber - b.setNumber);
 }
 
-function lastLogged(exerciseName, beforeDate) {
-  const entries = state.sets
-    .filter(s => s.exerciseName === exerciseName && s.date < beforeDate)
-    .sort((a,b) => b.date.localeCompare(a.date));
-  return entries.length ? entries[0] : null;
+function prevSessionTopSet(exerciseName, beforeDate) {
+  const entries = state.sets.filter(s => s.exerciseName === exerciseName && s.date < beforeDate);
+  if (!entries.length) return null;
+  const maxDate = entries.reduce((m, s) => (s.date > m ? s.date : m), entries[0].date);
+  const daySets = entries.filter(s => s.date === maxDate);
+  return daySets.reduce((best, s) => (!best || s.weight > best.weight) ? s : best, daySets[0]);
+}
+
+function renderWeekStrip() {
+  const weekStart = startOfWeekISO(state.selectedDate);
+  const dates = weekDatesFrom(weekStart);
+  const todayIso = todayISO();
+
+  const bubbles = dates.map(dateISO => {
+    const dName = effectiveDayName(dateISO);
+    const dObj = state.activePlan.days.find(x => x.day === dName);
+    const isRest = !dObj || dObj.type === "rest" || dObj.exercises.length === 0;
+    const isSelected = dateISO === state.selectedDate;
+    const isToday = dateISO === todayIso;
+    const hasLogged = state.sets.some(s => s.date === dateISO);
+    const dayNum = Number(dateISO.split("-")[2]);
+
+    return `<button type="button" class="day-bubble ${isRest ? "rest" : "lift"} ${isSelected ? "selected" : ""} ${isToday ? "today" : ""}" data-bubble-date="${dateISO}">
+      <span class="day-bubble-letter">${DAY_ABBR[weekdayNameFromISO(dateISO)]}</span>
+      <span class="day-bubble-num">${dayNum}</span>
+      ${hasLogged ? `<span class="day-bubble-dot"></span>` : ""}
+    </button>`;
+  }).join("");
+
+  return `
+    <div class="week-strip">
+      <div class="week-strip-head">
+        <button type="button" id="week-prev" class="week-nav-btn" aria-label="Previous week">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <div class="week-strip-label">${shortDateLabel(dates[0])} – ${shortDateLabel(dates[6])}</div>
+        <button type="button" id="week-next" class="week-nav-btn" aria-label="Next week">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+      <div class="week-bubble-row">${bubbles}</div>
+    </div>
+  `;
 }
 
 function renderToday() {
   const day = currentDayObj();
   const dayOptions = state.activePlan.days.map(d =>
-    `<option value="${escAttr(d.day)}" ${d.day === (state.selectedDayName||weekdayNameFromISO(state.selectedDate)) ? "selected":""}>${d.day} — ${escHtml(d.title)}</option>`
+    `<option value="${escAttr(d.day)}" ${d.day === effectiveDayName(state.selectedDate) ? "selected":""}>${d.day} — ${escHtml(d.title)}</option>`
   ).join("");
 
   let body;
@@ -197,16 +335,22 @@ function renderToday() {
   }
 
   return `
-    <div class="day-switch">
+    ${renderWeekStrip()}
+    <div class="day-switch" style="margin-top:10px;">
       <div class="day-switch-main">
         <div class="day-switch-date">${friendlyDate(state.selectedDate)}</div>
         <div class="day-switch-title">${escHtml(day.title)}</div>
       </div>
-      <input type="date" id="date-picker" value="${state.selectedDate}">
     </div>
     <div class="section-label">Logging as: </div>
     <div class="day-switch" style="margin-top:-8px;">
       <select id="day-override" style="width:100%;">${dayOptions}</select>
+      <button type="button" id="day-swap-btn" class="swap-btn" aria-label="Choose a different day">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 3l4 4-4 4"/><path d="M3 7h8"/>
+          <path d="M17 21l-4-4 4-4"/><path d="M21 17h-8"/>
+        </svg>
+      </button>
     </div>
     ${body}
   `;
@@ -215,14 +359,15 @@ function renderToday() {
 function renderExerciseCard(ex, index, date) {
   const isOpen = state.openExercise === ex.name;
   const logged = setsFor(date, ex.name);
-  const last = lastLogged(ex.name, date);
+  const prevTop = prevSessionTopSet(ex.name, date);
+  const best = bestSetFor(ex.name);
 
   const setRows = logged.map(s => `
     <div class="set-row" data-set-id="${s.id}">
       <div class="set-num">${s.setNumber}</div>
       <div class="set-main">
         <span class="val">${s.reps} reps × ${s.weight} lb</span>
-        ${s.rpe ? `<span class="val-sub"> · RPE ${s.rpe}</span>` : ""}
+        ${s.setType ? `<span class="type-badge type-${s.setType}">${setTypeLabel(s.setType)}</span>` : (s.rpe ? `<span class="val-sub"> · RPE ${s.rpe}</span>` : "")}
         ${s.notes ? `<div class="set-note">${escHtml(s.notes)}</div>` : ""}
       </div>
       <button class="set-del" data-del-set="${s.id}" aria-label="Delete set">✕</button>
@@ -242,17 +387,23 @@ function renderExerciseCard(ex, index, date) {
       </div>
       <div class="ex-body">
         ${ex.notes ? `<div class="ex-note">${escHtml(ex.notes)}</div>` : ""}
-        ${last ? `<div class="prev-log"><span class="prev-label">Last (${friendlyDate(last.date)})</span><span class="prev-val">${last.reps} × ${last.weight} lb${last.rpe ? " @ RPE "+last.rpe : ""}</span></div>` : `<div class="prev-log"><span class="prev-label">No history yet</span></div>`}
+        ${prevTop || best ? `<div class="prev-stats">
+          ${prevTop ? `<div class="prev-log"><span class="prev-label">Prev (${friendlyDate(prevTop.date)})</span><span class="prev-val">${prevTop.reps} × ${prevTop.weight} lb${setInlineTag(prevTop)}</span></div>` : `<div class="prev-log"><span class="prev-label">Prev</span><span class="prev-val prev-empty">No history yet</span></div>`}
+          ${best ? `<div class="prev-log"><span class="prev-label">Best (${friendlyDate(best.date)})</span><span class="prev-val prev-best">${best.reps} × ${best.weight} lb</span></div>` : ""}
+        </div>` : `<div class="prev-log"><span class="prev-label">No history yet</span></div>`}
         ${setRows}
         <form class="add-set-form" data-add-set="${escAttr(ex.name)}">
-          <div class="field-grid">
+          <div class="field-grid field-grid-2">
             <div class="field"><label>Reps</label><input type="number" inputmode="numeric" min="0" name="reps" required></div>
             <div class="field"><label>Weight (lb)</label><input type="number" inputmode="decimal" min="0" step="0.5" name="weight" required></div>
-            <div class="field"><label>RPE</label>
-              <select name="rpe">
-                <option value="">—</option>
-                ${[6,6.5,7,7.5,8,8.5,9,9.5,10].map(v=>`<option value="${v}">${v}</option>`).join("")}
-              </select>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Set type (optional)</label>
+            <input type="hidden" name="setType" value="">
+            <div class="type-toggle">
+              <button type="button" class="type-btn type-btn-feeder" data-type="feeder">Working</button>
+              <button type="button" class="type-btn type-btn-top" data-type="top">Top Set</button>
+              <button type="button" class="type-btn type-btn-backoff" data-type="backoff">Back-off</button>
             </div>
           </div>
           <div class="field" style="margin-bottom:8px;">
@@ -325,7 +476,7 @@ function renderHistory() {
     return `<div class="hist-snap-card" data-open-exercise="${escAttr(ex.name)}">
       <div class="hist-snap-name">${escHtml(ex.name)}</div>
       ${last ? `
-        <div class="hist-snap-row"><span class="hist-snap-label">Last</span><span class="hist-snap-val">${last.reps} × ${last.weight} lb${last.rpe?` @ RPE ${last.rpe}`:""} <span class="hist-snap-date">${friendlyDate(last.date)}</span></span></div>
+        <div class="hist-snap-row"><span class="hist-snap-label">Last</span><span class="hist-snap-val">${last.reps} × ${last.weight} lb${setInlineTag(last)} <span class="hist-snap-date">${friendlyDate(last.date)}</span></span></div>
         <div class="hist-snap-row"><span class="hist-snap-label">Best</span><span class="hist-snap-val hist-snap-best">${best.reps} × ${best.weight} lb <span class="hist-snap-date">${friendlyDate(best.date)}</span></span></div>
       ` : `<div class="hist-snap-empty">Not logged yet</div>`}
     </div>`;
@@ -361,7 +512,7 @@ function renderHistoryExerciseDetail() {
       const best = sets.reduce((m,s) => s.weight > m ? s.weight : m, 0);
       return `<div class="hist-day">
         <div class="hist-day-date"><span>${friendlyDate(date)}</span><span class="best">top ${best} lb</span></div>
-        ${sets.map(s => `<div class="hist-set-line"><span class="n">${s.setNumber}</span><span>${s.reps} × ${s.weight} lb${s.rpe?` @ RPE ${s.rpe}`:""}</span>${s.notes?`<span class="note">— ${escHtml(s.notes)}</span>`:""}</div>`).join("")}
+        ${sets.map(s => `<div class="hist-set-line"><span class="n">${s.setNumber}</span><span>${s.reps} × ${s.weight} lb</span>${s.setType ? `<span class="type-badge type-${s.setType}">${setTypeLabel(s.setType)}</span>` : (s.rpe ? `<span class="val-sub">@ RPE ${s.rpe}</span>` : "")}${s.notes?`<span class="note">— ${escHtml(s.notes)}</span>`:""}</div>`).join("")}
       </div>`;
     }).join("");
   }
@@ -396,7 +547,7 @@ function buildExportText(startISO, endISO) {
     const byExercise = byDate[date].reduce((acc,s)=>{ (acc[s.exerciseName]=acc[s.exerciseName]||[]).push(s); return acc; }, {});
     Object.keys(byExercise).forEach(exName => {
       const sets = byExercise[exName].sort((a,b)=>a.setNumber-b.setNumber);
-      const setsStr = sets.map(s => `${s.reps}x${s.weight}${s.rpe?`@${s.rpe}`:""}`).join(", ");
+      const setsStr = sets.map(s => `${s.reps}x${s.weight}${s.setType ? `[${setTypeLabel(s.setType)}]` : (s.rpe?`@${s.rpe}`:"")}`).join(", ");
       out += `  ${exName}: ${setsStr}\n`;
       sets.filter(s=>s.notes).forEach(s => out += `    note: ${s.notes}\n`);
     });
@@ -408,8 +559,8 @@ function buildExportText(startISO, endISO) {
 function buildExportCSV(startISO, endISO) {
   const inRange = state.sets.filter(s => s.date >= startISO && s.date <= endISO)
     .sort((a,b) => (a.date+String(a.setNumber).padStart(3,"0")).localeCompare(b.date+String(b.setNumber).padStart(3,"0")));
-  const rows = [["Date","Day","Exercise","Set","Reps","Weight (lb)","RPE","Notes"]];
-  inRange.forEach(s => rows.push([s.date, weekdayNameFromISO(s.date), s.exerciseName, s.setNumber, s.reps, s.weight, s.rpe||"", s.notes||""]));
+  const rows = [["Date","Day","Exercise","Set","Reps","Weight (lb)","Set Type","RPE","Notes"]];
+  inRange.forEach(s => rows.push([s.date, weekdayNameFromISO(s.date), s.exerciseName, s.setNumber, s.reps, s.weight, s.setType?setTypeLabel(s.setType):"", s.rpe||"", s.notes||""]));
   return rows.map(r => r.map(csvEscape).join(",")).join("\n");
 }
 function csvEscape(v) {
@@ -515,15 +666,30 @@ function bindViewEvents() {
   const root = document.getElementById("view-root");
 
   // ---- TODAY ----
-  const datePicker = document.getElementById("date-picker");
-  if (datePicker) datePicker.addEventListener("change", (e) => {
-    state.selectedDate = e.target.value;
-    state.selectedDayName = null;
+  const weekPrev = document.getElementById("week-prev");
+  if (weekPrev) weekPrev.addEventListener("click", () => {
+    state.selectedDate = addDaysISO(state.selectedDate, -7);
     render();
   });
+  const weekNext = document.getElementById("week-next");
+  if (weekNext) weekNext.addEventListener("click", () => {
+    state.selectedDate = addDaysISO(state.selectedDate, 7);
+    render();
+  });
+  root.querySelectorAll("[data-bubble-date]").forEach(el => {
+    el.addEventListener("click", () => {
+      state.selectedDate = el.dataset.bubbleDate;
+      render();
+    });
+  });
   const dayOverride = document.getElementById("day-override");
-  if (dayOverride) dayOverride.addEventListener("change", (e) => {
-    state.selectedDayName = e.target.value;
+  if (dayOverride) dayOverride.addEventListener("change", async (e) => {
+    await setDayOverride(state.selectedDate, e.target.value);
+    render();
+  });
+  const daySwapBtn = document.getElementById("day-swap-btn");
+  if (daySwapBtn) daySwapBtn.addEventListener("click", () => {
+    state.dayPickerOpen = true;
     render();
   });
 
@@ -532,6 +698,22 @@ function bindViewEvents() {
       const name = el.dataset.toggleEx;
       state.openExercise = state.openExercise === name ? null : name;
       render();
+    });
+  });
+
+  root.querySelectorAll(".type-toggle").forEach(group => {
+    const hiddenInput = group.parentElement.querySelector('input[name="setType"]');
+    group.querySelectorAll(".type-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const isActive = btn.classList.contains("active");
+        group.querySelectorAll(".type-btn").forEach(b => b.classList.remove("active"));
+        if (!isActive) {
+          btn.classList.add("active");
+          hiddenInput.value = btn.dataset.type;
+        } else {
+          hiddenInput.value = "";
+        }
+      });
     });
   });
 
@@ -547,7 +729,8 @@ function bindViewEvents() {
         setNumber: existing.length + 1,
         reps: Number(fd.get("reps")),
         weight: Number(fd.get("weight")),
-        rpe: fd.get("rpe") || null,
+        setType: fd.get("setType") || null,
+        rpe: null,
         notes: (fd.get("notes")||"").trim(),
         timestamp: Date.now()
       };
@@ -571,8 +754,10 @@ function bindViewEvents() {
 
   // ---- WEEK ----
   root.querySelectorAll("[data-jump-day]").forEach(el => {
-    el.addEventListener("click", () => {
-      state.selectedDayName = el.dataset.jumpDay;
+    el.addEventListener("click", async () => {
+      const dateToUse = todayISO();
+      state.selectedDate = dateToUse;
+      await setDayOverride(dateToUse, el.dataset.jumpDay);
       state.tab = "today";
       render();
     });
@@ -842,7 +1027,6 @@ async function saveImportedPlan() {
   state.plans.push(plan);
   state.activePlan = plan;
   state.importParsed = null;
-  state.selectedDayName = null;
   toast("Plan saved");
   state.tab = "today";
   render();
