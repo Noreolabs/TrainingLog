@@ -417,6 +417,7 @@ button { font-family: inherit; }
 }
 .prev-stats .prev-log { margin-bottom: 0; }
 .prev-val.prev-best { color: var(--amber); font-weight: 700; }
+.prev-date { color: var(--text-dim); font-weight: 500; font-size: 11px; }
 .prev-val.prev-empty { font-style: italic; font-weight: 500; color: var(--text-dim); }
 .prev-log .prev-label { color: var(--text-dim); font-weight: 700; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.06em; width: 32px; flex-shrink: 0; }
 .prev-log .prev-val { color: var(--text); font-weight: 600; }

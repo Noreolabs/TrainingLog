@@ -388,8 +388,8 @@ function renderExerciseCard(ex, index, date) {
       <div class="ex-body">
         ${ex.notes ? `<div class="ex-note">${escHtml(ex.notes)}</div>` : ""}
         ${prevTop || best ? `<div class="prev-stats">
-          ${prevTop ? `<div class="prev-log"><span class="prev-label">Prev (${friendlyDate(prevTop.date)})</span><span class="prev-val">${prevTop.reps} × ${prevTop.weight} lb${setInlineTag(prevTop)}</span></div>` : `<div class="prev-log"><span class="prev-label">Prev</span><span class="prev-val prev-empty">No history yet</span></div>`}
-          ${best ? `<div class="prev-log"><span class="prev-label">Best (${friendlyDate(best.date)})</span><span class="prev-val prev-best">${best.reps} × ${best.weight} lb</span></div>` : ""}
+          ${prevTop ? `<div class="prev-log"><span class="prev-label">Prev</span><span class="prev-val">${prevTop.reps} × ${prevTop.weight} lb${setInlineTag(prevTop)} <span class="prev-date">${friendlyDate(prevTop.date)}</span></span></div>` : `<div class="prev-log"><span class="prev-label">Prev</span><span class="prev-val prev-empty">No history yet</span></div>`}
+          ${best ? `<div class="prev-log"><span class="prev-label">Best</span><span class="prev-val prev-best">${best.reps} × ${best.weight} lb <span class="prev-date">${friendlyDate(best.date)}</span></span></div>` : ""}
         </div>` : `<div class="prev-log"><span class="prev-label">No history yet</span></div>`}
         ${setRows}
         <form class="add-set-form" data-add-set="${escAttr(ex.name)}">
